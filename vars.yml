@@ -1,0 +1,22 @@
+harbor_hostname: harbor.example.com
+harbor_username: admin
+harbor_password: Harbor12345
+harbor_project: build-service-imgs
+kubeconfig: |
+  apiVersion: v1
+  clusters:
+  - cluster: ...
+  contexts:
+  - context: ...
+  current-context: ...
+  kind: Config
+  preferences: {}
+  users: ...
+pivnet_api_token: 
+pivnet_username: 
+pivnet_password: 
+aws_access_key_id: 
+aws_secret_access_key: 
+aws_region: ap-northeast-1
+s3_bucket: 
+s3_endpoint: https://s3-ap-northeast-1.amazonaws.com

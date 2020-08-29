@@ -1,0 +1,248 @@
+resource_types:
+- name: pivnet
+  type: docker-image
+  source:
+    repository: pivotalcf/pivnet-resource
+    tag: latest-final
+
+resources:
+- name: build-service
+  type: pivnet
+  source:
+    api_token: ((pivnet_api_token))
+    product_slug: build-service
+    product_version: 1\..*\..*
+- name: tbs-dependencies
+  type: pivnet
+  source:
+    api_token: ((pivnet_api_token))
+    product_slug: tbs-dependencies
+    product_version: .*
+
+- name: images-relocated
+  type: s3
+  source:
+    disable_ssl: false
+    access_key_id: ((aws_access_key_id))
+    secret_access_key: ((aws_secret_access_key))
+    endpoint: ((s3_endpoint))
+    bucket: ((s3_bucket))
+    region_name: ((aws_region))
+    versioned_file: images-relocated.lock
+params:
+  harbor: &harbor
+    HARBOR_HOSTNAME: ((harbor_hostname))
+    HARBOR_URL: https://((harbor_hostname))
+    HARBOR_USERNAME: ((harbor_username))
+    HARBOR_PASSWORD: ((harbor_password))
+    HARBOR_PROJECT: ((harbor_project))
+    HARBOR_REPOSITORY: ((harbor_hostname))/((harbor_project))/build-service
+  pivnet: &pivnet
+    PIVNET_USERNAME: ((pivnet_username))
+    PIVNET_PASSWORD:  ((pivnet_password))
+
+jobs:
+- name: relocate-images
+  plan:
+  - in_parallel:
+    - get: build-service
+      params:
+        globs: ["*.tar"]
+        unpack: true
+  - task: kbld-relocate
+    params:
+      <<: *harbor
+      <<: *pivnet
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: relintdockerhubpushbot/cf-for-k8s-ci
+      inputs:
+      - name: build-service
+      outputs:
+      - name: out
+      run:
+        path: bash
+        args:
+        - -ce
+        - |
+          docker login registry.pivotal.io -u ${PIVNET_USERNAME} -p ${PIVNET_PASSWORD}
+          docker login ${HARBOR_HOSTNAME} -u ${HARBOR_USERNAME} -p ${HARBOR_PASSWORD}
+          kbld relocate -f build-service/images.lock --lock-output out/images-relocated.lock --repository ${HARBOR_REPOSITORY}
+  - put: images-relocated
+    params:
+      file: out/images-relocated.lock
+- name: deploy-tbs
+  plan:
+  - in_parallel:
+    - get: build-service
+      passed:
+      - relocate-images
+      params:
+        globs: ["*.tar"]
+        unpack: true
+    - get: images-relocated
+      passed:
+      - relocate-images
+      trigger: true
+  - task: kapp-deploy
+    params:
+      <<: *harbor
+      KUBECONFIG_VALUE: ((kubeconfig))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: relintdockerhubpushbot/cf-for-k8s-ci
+      inputs:
+      - name: build-service
+      - name: images-relocated
+      run:
+        path: bash
+        args:
+        - -cex
+        - |
+          mkdir -p ~/.kube
+          cat <<EOF > ~/.kube/config
+          ${KUBECONFIG_VALUE}
+          EOF
+          ytt -f build-service/values.yaml \
+              -f build-service/manifests/ \
+              -v docker_repository="${HARBOR_REPOSITORY}" \
+              -v docker_username="${HARBOR_USERNAME}" \
+              -v docker_password="${HARBOR_PASSWORD}" \
+              | kbld -f images-relocated/images-relocated.lock -f- \
+              | kapp deploy -a tanzu-build-service -f- -y
+- name: kp-import
+  plan:
+  - in_parallel:
+    - get: kp
+      resource: build-service
+      params:
+        globs: ["kp-linux-*"]
+      passed:
+      - deploy-tbs
+    - get: tbs-dependencies
+    - get: images-relocated
+      passed:
+      - deploy-tbs
+      trigger: true
+  - task: kp-import
+    params:
+      <<: *harbor
+      <<: *pivnet
+      KUBECONFIG_VALUE: ((kubeconfig))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: relintdockerhubpushbot/cf-for-k8s-ci
+      inputs:
+      - name: kp
+      - name: tbs-dependencies
+      run:
+        path: bash
+        args:
+        - -cex
+        - |
+          mkdir -p ~/.kube
+          cat <<EOF > ~/.kube/config
+          ${KUBECONFIG_VALUE}
+          EOF
+          install kp/kp-linux-* /usr/local/bin/kp
+          docker login registry.pivotal.io -u ${PIVNET_USERNAME} -p ${PIVNET_PASSWORD}
+          docker login ${HARBOR_HOSTNAME} -u ${HARBOR_USERNAME} -p ${HARBOR_PASSWORD}
+          kp import -f ./tbs-dependencies/descriptor-*.yaml
+- name: create-synchronized-secret
+  plan:
+  - in_parallel:
+    - get: images-relocated
+      passed:
+      - kp-import
+      trigger: true
+  - task: create-synchronized-secret
+    params:
+      <<: *harbor
+      KUBECONFIG_VALUE: ((kubeconfig))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: relintdockerhubpushbot/cf-for-k8s-ci
+      run:
+        path: bash
+        args:
+        - -ce
+        - |
+          mkdir -p ~/.kube
+          cat <<EOF > ~/.kube/config
+          ${KUBECONFIG_VALUE}
+          EOF
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: synchronized-secret
+            namespace: build-service
+            labels:
+              com.vmware.tanzu.buildservice.sync: "true"
+          type: kubernetes.io/dockerconfigjson
+          stringData:
+            .dockerconfigjson: |
+              {
+                  "auths": {
+                      "${HARBOR_HOSTNAME}": {
+                          "auth": "$(echo -n ${HARBOR_USERNAME}:${HARBOR_PASSWORD} | base64)"
+                      }
+                  }
+              }
+          EOF
+- name: create-bucket
+  plan:
+  - task: create-bucket
+    params:
+      S3_BUCKET: ((s3_bucket))
+      S3_ENDPOINT: ((s3_endpoint))
+      AWS_DEFAULT_REGION: ((aws_region))
+      AWS_ACCESS_KEY_ID: ((aws_access_key_id))
+      AWS_SECRET_ACCESS_KEY: ((aws_secret_access_key))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: mesosphere/aws-cli
+      run:
+        path: sh
+        args:
+        - -cux
+        - |
+          LS=$(aws --endpoint-url ${S3_ENDPOINT} s3 ls | grep ${S3_BUCKET})
+          if [ "${LS}" = "" ];then
+            aws --endpoint-url ${S3_ENDPOINT} s3 mb s3://${S3_BUCKET}
+            aws --endpoint-url ${S3_ENDPOINT} s3api put-bucket-versioning --bucket ${S3_BUCKET} --versioning-configuration Status=Enabled
+          else
+            echo "${S3_BUCKET} already exists."
+          fi
+- name: create-harbor-project
+  plan:
+  - task: clear-harbor-project
+    params:
+      <<: *harbor
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: relintdockerhubpushbot/cf-for-k8s-ci
+      run:
+        path: bash
+        args:
+        - -ce
+        - |
+          curl -s -k -u ${HARBOR_USERNAME}:${HARBOR_PASSWORD} -X POST "${HARBOR_URL}/api/v2.0/projects" -H "Content-Type: application/json" -d "{ \"project_name\": \"${HARBOR_PROJECT}\"}"
