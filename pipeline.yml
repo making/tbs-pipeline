@@ -202,6 +202,53 @@ jobs:
                   }
               }
           EOF
+- name: kp-secret-create-default
+  plan:
+  - in_parallel:
+    - get: kp
+      resource: build-service
+      params:
+        globs: ["kp-linux-*"]
+      passed:
+      - deploy-tbs
+    - get: images-relocated
+      passed:
+      - kp-import
+      trigger: true
+  - task: kp-secret-create
+    params:
+      <<: *harbor
+      KUBECONFIG_VALUE: ((kubeconfig))
+      DOCKER_USERHANE: ((dockerhub_username))
+      DOCKER_PASSWORD: ((dockerhub_password))
+      GITHUB_PRIVATE_KEY: ((github_private_key))
+      REGISTRY_PASSWORD: ((harbor_password))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: relintdockerhubpushbot/cf-for-k8s-ci
+      inputs:
+      - name: kp
+      run:
+        path: bash
+        args:
+        - -cex
+        - |
+          mkdir -p ~/.kube
+          cat <<EOF > ~/.kube/config
+          ${KUBECONFIG_VALUE}
+          EOF
+          install kp/kp-linux-* /usr/local/bin/kp
+          kp secret create dockerhub --dockerhub ${DOCKER_USERHANE}
+          kp secret create harbor --registry ${HARBOR_HOSTNAME} --registry-user ${HARBOR_USERNAME}
+          export GIT_SSH_KEY_PATH=$(pwd)/git_ssh_key
+          cat <<EOF > ${GIT_SSH_KEY_PATH}
+          ${GITHUB_PRIVATE_KEY}
+          EOF
+          kp secret create github --git-url git@github.com
+
 - name: create-bucket
   plan:
   - task: create-bucket
