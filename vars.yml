@@ -1,3 +1,8 @@
+ca_cert: |
+  -----BEGIN CERTIFICATE-----
+  ...
+  -----END CERTIFICATE-----
+git_url: github.com
 harbor_hostname: harbor.example.com
 harbor_username: admin
 harbor_password: Harbor12345

@@ -53,6 +53,7 @@ jobs:
     params:
       <<: *harbor
       <<: *pivnet
+      CA_CERT: ((ca_cert))
     config:
       platform: linux
       image_resource:
@@ -68,9 +69,11 @@ jobs:
         args:
         - -ce
         - |
+          echo "${CA_CERT}" > /usr/local/share/ca-certificates/ca_cert.pem
+          update-ca-certificates
           docker login registry.pivotal.io -u ${PIVNET_USERNAME} -p ${PIVNET_PASSWORD}
           docker login ${HARBOR_HOSTNAME} -u ${HARBOR_USERNAME} -p ${HARBOR_PASSWORD}
-          kbld relocate -f build-service/images.lock --lock-output out/images-relocated.lock --repository ${HARBOR_REPOSITORY}
+          kbld relocate -f build-service/images.lock --lock-output out/images-relocated.lock --repository ${HARBOR_REPOSITORY} --registry-ca-cert-path /usr/local/share/ca-certificates/ca_cert.pem
   - put: images-relocated
     params:
       file: out/images-relocated.lock
@@ -91,6 +94,7 @@ jobs:
     params:
       <<: *harbor
       KUBECONFIG_VALUE: ((kubeconfig))
+      CA_CERT: ((ca_cert))
     config:
       platform: linux
       image_resource:
@@ -109,8 +113,10 @@ jobs:
           cat <<EOF > ~/.kube/config
           ${KUBECONFIG_VALUE}
           EOF
+          echo "${CA_CERT}" > ./ca_cert.pem
           ytt -f build-service/values.yaml \
               -f build-service/manifests/ \
+              -f ./ca_cert.pem \
               -v docker_repository="${HARBOR_REPOSITORY}" \
               -v docker_username="${HARBOR_USERNAME}" \
               -v docker_password="${HARBOR_PASSWORD}" \
@@ -135,6 +141,7 @@ jobs:
       <<: *harbor
       <<: *pivnet
       KUBECONFIG_VALUE: ((kubeconfig))
+      CA_CERT: ((ca_cert))
     config:
       platform: linux
       image_resource:
@@ -154,6 +161,8 @@ jobs:
           ${KUBECONFIG_VALUE}
           EOF
           install kp/kp-linux-* /usr/local/bin/kp
+          echo "${CA_CERT}" > /usr/local/share/ca-certificates/ca_cert.pem
+          update-ca-certificates
           docker login registry.pivotal.io -u ${PIVNET_USERNAME} -p ${PIVNET_PASSWORD}
           docker login ${HARBOR_HOSTNAME} -u ${HARBOR_USERNAME} -p ${HARBOR_PASSWORD}
           kp import -f ./tbs-dependencies/descriptor-*.yaml
@@ -219,10 +228,9 @@ jobs:
     params:
       <<: *harbor
       KUBECONFIG_VALUE: ((kubeconfig))
-      DOCKER_USERHANE: ((dockerhub_username))
-      DOCKER_PASSWORD: ((dockerhub_password))
       GITHUB_PRIVATE_KEY: ((github_private_key))
       REGISTRY_PASSWORD: ((harbor_password))
+      GIT_URL: ((git_url))
     config:
       platform: linux
       image_resource:
@@ -247,7 +255,7 @@ jobs:
           cat <<EOF > ${GIT_SSH_KEY_PATH}
           ${GITHUB_PRIVATE_KEY}
           EOF
-          kp secret create github --git-url git@github.com
+          kp secret create github --git-url git@${GIT_URL}
 
 - name: create-bucket
   plan:
